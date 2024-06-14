@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score
 import random
 import func 
+import torch.nn.functional as F
 
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
@@ -34,21 +35,19 @@ save_model_path = CONFIG['COMMON']['save_path']+'/model/best_'+model_name+'.pt'
 save_image_path = CONFIG['COMMON']['save_path']+'/image/实验图片/'+model_name+'_loss.png'
 
 
+
 class Attention(nn.Module):
     def __init__(self, hidden_size):
         super(Attention, self).__init__()
-        self.hidden_size = hidden_size
-        self.attn = nn.Linear(hidden_size, hidden_size)
-        self.v = nn.Parameter(torch.rand(hidden_size))
-        self.softmax = nn.Softmax(dim=1)
-
-    def forward(self, encoder_outputs):
-        # 计算注意力权重
-        energy = torch.tanh(self.attn(encoder_outputs))
-        attention_weights = self.softmax(torch.matmul(energy, self.v.unsqueeze(1)).squeeze(2))
-        # 对编码器输出进行加权求和
-        context_vector = torch.sum(attention_weights.unsqueeze(2) * encoder_outputs, dim=1)
+        self.attention_weights = nn.Linear(hidden_size, 1, bias=False)
+    
+    def forward(self, lstm_output):
+        # lstm_output: [batch_size, seq_length, hidden_size]
+        attention_scores = self.attention_weights(lstm_output)  # [batch_size, seq_length, 1]
+        attention_weights = F.softmax(attention_scores, dim=1)  # [batch_size, seq_length, 1]
+        context_vector = torch.sum(attention_weights * lstm_output, dim=1)  # [batch_size, hidden_size]
         return context_vector
+
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, data, seq_length, pred_length):
@@ -92,6 +91,7 @@ class CNN_LSTM(nn.Module):
         self.kernel_size = kernel_size
         
         self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        # self.conv2 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, output_size)
         self.attention = Attention(hidden_size)
@@ -109,6 +109,19 @@ class CNN_LSTM(nn.Module):
         out, _ = self.lstm(x, (h0, c0))
         out = self.fc(out[:, -1, :])
         return out
+
+    # def forward(self, x):
+    #     B, T, N = x.size()
+    #     x = x.reshape(B, self.seq_length // self.main_period, self.main_period, N).permute(0, 3, 1, 2).contiguous()
+    #     x = self.conv1(x)
+    #     x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+    #     h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+    #     c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+    #     lstm_out, _ = self.lstm(x, (h0, c0))
+    #     context_vector = self.attention(lstm_out)
+    #     out = self.fc(context_vector)
+    #     return out
+    
 
 def get_dataloaders(model_name):# 读取训练集和验证集的数据
     batch_size = CONFIG[model_name]['batch_size']
@@ -165,9 +178,9 @@ def train_model(model_name, train_dataloader, val_dataloader):
     # 模型公有参数
     num_epochs = CONFIG[model_name]['num_epochs']
     learning_rate = CONFIG[model_name]['learning_rate']
-    # 学习率衰减参数
-    lr_decay_step = 10
-    lr_decay_gamma = 0.1
+    # 学习率衰减参数(不)
+    lr_decay_step = 15
+    lr_decay_gamma = 1
     # 早停参数
     patience = 5
     best_val_loss = float('inf')
@@ -237,6 +250,8 @@ def train_model(model_name, train_dataloader, val_dataloader):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_wts = copy.deepcopy(model.state_dict())
+            save_model_path
+            torch.save(best_model_wts, save_model_path)
             patience_counter = 0
         else:
             patience_counter += 1
@@ -247,7 +262,7 @@ def train_model(model_name, train_dataloader, val_dataloader):
             break
     
     # 加载最好的模型权重
-    model.load_state_dict(best_model_wts)
+    # model.load_state_dict(best_model_wts)
     
     print("-------------------  Finish training the model  -------------------")
     print(f'Best Val Loss: {best_val_loss:.4f}')
