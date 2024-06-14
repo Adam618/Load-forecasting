@@ -47,7 +47,27 @@ class Attention(nn.Module):
         attention_weights = F.softmax(attention_scores, dim=1)  # [batch_size, seq_length, 1]
         context_vector = torch.sum(attention_weights * lstm_output, dim=1)  # [batch_size, hidden_size]
         return context_vector
+    
+class ConvLayer(nn.Module):
+    def __init__(self, c_in):
+        super(ConvLayer, self).__init__()
+        padding = 1 if torch.__version__>='1.5.0' else 2
+        self.downConv = nn.Conv1d(in_channels=c_in,
+                                  out_channels=c_in,
+                                  kernel_size=3,
+                                  padding=padding,
+                                  padding_mode='circular')
+        self.norm = nn.BatchNorm1d(c_in)
+        self.activation = nn.ELU()
+        self.maxPool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
 
+    def forward(self, x):
+        x = self.downConv(x.permute(0, 2, 1))
+        x = self.norm(x)
+        x = self.activation(x)
+        x = self.maxPool(x)
+        x = x.transpose(1,2)
+        return x
 
 class TimeSeriesDataset(Dataset):
     def __init__(self, data, seq_length, pred_length):
@@ -81,6 +101,37 @@ def FFT_for_Period(x, k=2):
     period = x.shape[1] // top_list
     return period, abs(xf).mean(-1)[:, top_list]
 
+# class CNN_LSTM(nn.Module):
+#     def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+#         super(CNN_LSTM, self).__init__()
+#         self.hidden_size = hidden_size
+#         self.num_layers = num_layers
+#         self.seq_length = seq_length
+#         self.main_period = main_period
+#         self.kernel_size = kernel_size
+        
+#         self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+#         # self.conv2 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+#         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+#         self.fc = nn.Linear(hidden_size, output_size)
+#         # self.attention = Attention(hidden_size)
+#         self.convLayer = ConvLayer(hidden_size)
+
+#     def forward(self, x):
+#         B, T, N = x.size()
+#         x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period,
+#                               N).permute(0, 3, 1, 2).contiguous()
+#         # x = x.reshape(B, self.main_period, self.seq_length//self.main_period ,
+#         #                       N).permute(0, 3, 1, 2).contiguous()
+#         x = self.conv1(x)
+#         x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+#         # x = self.convLayer(x)
+#         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+#         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+#         out, _ = self.lstm(x, (h0, c0))
+#         out = self.fc(out[:, -1, :])
+#         return out
+
 class CNN_LSTM(nn.Module):
     def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
         super(CNN_LSTM, self).__init__()
@@ -91,10 +142,12 @@ class CNN_LSTM(nn.Module):
         self.kernel_size = kernel_size
         
         self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
-        # self.conv2 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        # self.conv2 = nn.Conv2d(input_size, input_size, kernel_size=2*2+1, padding=2)
+        self.convLayer = ConvLayer(input_size)
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, output_size)
-        self.attention = Attention(hidden_size)
+        # self.attention = Attention(hidden_size)
+        
 
     def forward(self, x):
         B, T, N = x.size()
@@ -103,24 +156,16 @@ class CNN_LSTM(nn.Module):
         # x = x.reshape(B, self.main_period, self.seq_length//self.main_period ,
         #                       N).permute(0, 3, 1, 2).contiguous()
         x = self.conv1(x)
+        
+        # x = self.conv2(x)
         x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+        x = self.convLayer(x)
+        # x = self.convLayer(x)
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         out, _ = self.lstm(x, (h0, c0))
         out = self.fc(out[:, -1, :])
         return out
-
-    # def forward(self, x):
-    #     B, T, N = x.size()
-    #     x = x.reshape(B, self.seq_length // self.main_period, self.main_period, N).permute(0, 3, 1, 2).contiguous()
-    #     x = self.conv1(x)
-    #     x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
-    #     h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-    #     c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-    #     lstm_out, _ = self.lstm(x, (h0, c0))
-    #     context_vector = self.attention(lstm_out)
-    #     out = self.fc(context_vector)
-    #     return out
     
 
 def get_dataloaders(model_name):# 读取训练集和验证集的数据
