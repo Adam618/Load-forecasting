@@ -11,6 +11,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolu
 import random
 import func 
 import torch.nn.functional as F
+import copy
+import math
 
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
 
@@ -22,13 +24,15 @@ torch.cuda.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-model_name = 'CNN_LSTM'
+# model_name = 'TwoD_CNN_LSTM_Attention'
+model_name = 'TwoD_CNN_LSTM'
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 scaler = StandardScaler()
 CONFIG = func.load_config()
 func.print_config(model_name)
 data_path = CONFIG['COMMON']['data_path']  
 seq_length = CONFIG['COMMON']['seq_length']
+input_size = CONFIG['COMMON']['input_size']
 pred_length = CONFIG['COMMON']['pred_length']
 output_size = CONFIG['COMMON']['pred_length']
 save_model_path = CONFIG['COMMON']['save_path']+'/model/best_'+model_name+'.pt'
@@ -36,18 +40,23 @@ save_image_path = CONFIG['COMMON']['save_path']+'/image/实验图片/'+model_nam
 
 
 
-class Attention(nn.Module):
-    def __init__(self, hidden_size):
-        super(Attention, self).__init__()
-        self.attention_weights = nn.Linear(hidden_size, 1, bias=False)
+class ChannelAttention(nn.Module):
+    def __init__(self, num_channels, reduction_ratio=9):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(num_channels, num_channels//reduction_ratio, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(num_channels//reduction_ratio, num_channels, bias=False),
+            nn.Sigmoid()
+        )
     
-    def forward(self, lstm_output):
-        # lstm_output: [batch_size, seq_length, hidden_size]
-        attention_scores = self.attention_weights(lstm_output)  # [batch_size, seq_length, 1]
-        attention_weights = F.softmax(attention_scores, dim=1)  # [batch_size, seq_length, 1]
-        context_vector = torch.sum(attention_weights * lstm_output, dim=1)  # [batch_size, hidden_size]
-        return context_vector
-    
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
 class ConvLayer(nn.Module):
     def __init__(self, c_in):
         super(ConvLayer, self).__init__()
@@ -101,44 +110,32 @@ def FFT_for_Period(x, k=2):
     period = x.shape[1] // top_list
     return period, abs(xf).mean(-1)[:, top_list]
 
-# class CNN_LSTM(nn.Module):
-#     def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
-#         super(CNN_LSTM, self).__init__()
-#         self.hidden_size = hidden_size
-#         self.num_layers = num_layers
-#         self.seq_length = seq_length
-#         self.main_period = main_period
-#         self.kernel_size = kernel_size
-        
-#         self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
-#         # self.conv2 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
-#         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-#         self.fc = nn.Linear(hidden_size, output_size)
-#         # self.attention = Attention(hidden_size)
-#         self.convLayer = ConvLayer(hidden_size)
 
-#     def forward(self, x):
-#         B, T, N = x.size()
-#         x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period,
-#                               N).permute(0, 3, 1, 2).contiguous()
-#         # x = x.reshape(B, self.main_period, self.seq_length//self.main_period ,
-#         #                       N).permute(0, 3, 1, 2).contiguous()
-#         x = self.conv1(x)
-#         x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
-#         # x = self.convLayer(x)
-#         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-#         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-#         out, _ = self.lstm(x, (h0, c0))
-#         out = self.fc(out[:, -1, :])
-#         return out
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length):
+        super(LSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+       
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+        # self.attention = Attention(hidden_size)
+
+    def forward(self, x):
+        B, T, N = x.size()
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return out
 
 class CNN_LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length,  kernel_size):
         super(CNN_LSTM, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.seq_length = seq_length
-        self.main_period = main_period
         self.kernel_size = kernel_size
         
         self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
@@ -151,16 +148,7 @@ class CNN_LSTM(nn.Module):
 
     def forward(self, x):
         B, T, N = x.size()
-        x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period,
-                              N).permute(0, 3, 1, 2).contiguous()
-        # x = x.reshape(B, self.main_period, self.seq_length//self.main_period ,
-        #                       N).permute(0, 3, 1, 2).contiguous()
-        x = self.conv1(x)
-        
-        # x = self.conv2(x)
-        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
         x = self.convLayer(x)
-        # x = self.convLayer(x)
         h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
         out, _ = self.lstm(x, (h0, c0))
@@ -168,6 +156,65 @@ class CNN_LSTM(nn.Module):
         return out
     
 
+
+class TwoD_CNN_LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+        super(TwoD_CNN_LSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.main_period = main_period
+        self.kernel_size = kernel_size
+        
+        self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        self.convLayer = ConvLayer(input_size)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+        
+
+    def forward(self, x):
+        B, T, N = x.size()
+        x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period, N).permute(0, 3, 1, 2).contiguous()
+        x = self.conv1(x)
+        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+
+        x = self.convLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return out
+
+class TwoD_CNN_LSTM_Attention(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+        super(TwoD_CNN_LSTM_Attention, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.main_period = main_period
+        self.kernel_size = kernel_size
+        
+        self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        self.ca1 = ChannelAttention(input_size)  # Channel Attention for the first convolution
+        self.convLayer = ConvLayer(input_size)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+        
+
+    def forward(self, x):
+        B, T, N = x.size()
+        x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period, N).permute(0, 3, 1, 2).contiguous()
+        
+        x = self.conv1(x)
+        x = self.ca1(x)  # Apply channel attention after the first convolution
+        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+        x = self.convLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return out
+    
 def get_dataloaders(model_name):# 读取训练集和验证集的数据
     batch_size = CONFIG[model_name]['batch_size']
 
@@ -214,31 +261,49 @@ def get_dataloaders(model_name):# 读取训练集和验证集的数据
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     return test_df_origin, train_dataloader, val_dataloader, test_dataloader
 
-import torch
-import torch.nn as nn
-import matplotlib.pyplot as plt
-import copy
+
 
 def train_model(model_name, train_dataloader, val_dataloader):
     # 模型公有参数
     num_epochs = CONFIG[model_name]['num_epochs']
     learning_rate = CONFIG[model_name]['learning_rate']
     # 学习率衰减参数(不)
-    lr_decay_step = 15
+    lr_decay_step = 5
     lr_decay_gamma = 1
     # 早停参数
-    patience = 5
+    patience = 10
     best_val_loss = float('inf')
     patience_counter = 0
-    # 模型私有参数
-    if model_name == 'CNN_LSTM':
-        input_size = CONFIG['CNN_LSTM']['input_size']
-        hidden_size = CONFIG['CNN_LSTM']['hidden_size']
-        num_layers = CONFIG['CNN_LSTM']['num_layers']
-        main_period = CONFIG['CNN_LSTM']['main_period']
-        kernel_size = CONFIG['CNN_LSTM']['kernel_size']
-        model = CNN_LSTM(input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size)
-        model.to(device)
+
+
+    # CONFIG 是一个字典，包含所有模型的配置参数
+    model_params = CONFIG[model_name]
+
+    # 创建模型的通用参数
+    # input_size = model_params['input_size']
+    hidden_size = model_params['hidden_size']
+    num_layers = model_params['num_layers']
+    # output_size = CONFIG['COMMON']['output_size'] 
+    # seq_length = model_params['seq_length']   
+
+    # 特定参数
+    kernel_size = model_params.get('kernel_size', None)  # 仅对 CNN_LSTM、TwoD_CNN_LSTM 有用
+    main_period = model_params.get('main_period', None)  # 仅对 TwoD_CNN_LSTM 有用
+
+
+    # 创建模型实例
+    if model_name == 'TwoD_CNN_LSTM':
+        model = TwoD_CNN_LSTM(input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size)
+    elif model_name == 'TwoD_CNN_LSTM_Attention':
+        model = TwoD_CNN_LSTM_Attention(input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size)
+    elif model_name == 'CNN_LSTM':
+        model = CNN_LSTM(input_size, hidden_size, num_layers, output_size, seq_length, kernel_size)
+    elif model_name == 'LSTM':
+        model = LSTM(input_size, hidden_size, num_layers, output_size, seq_length)
+
+  
+    model.to(device)
+
 
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -367,7 +432,8 @@ def test_model(model_name, test_dataloader, test_df_origin, model):
     plt.plot(test_true[n], label='True')
     plt.plot(predictions[n], label='Predicted')
     plt.legend()
-    plt.show()
+    plt.show(block=True)
+    
 
     test_true = test_true.flatten()
     # 将预测结果转换为pred_length维数组
@@ -378,7 +444,8 @@ def test_model(model_name, test_dataloader, test_df_origin, model):
     plt.plot(test_true[-96:], label='True')
     plt.plot(predictions[-96:], label='Predicted')
     plt.legend()
-    plt.show()
+    plt.show(block=True)
+    plt.savefig(CONFIG['COMMON']['save_path']+'/image/实验图片/'+model_name+'_predition_4223.png')
     print('Metrics:')
     mae = mean_absolute_error(test_true, predictions)
     print(f'MAE: {mae:.2f}')

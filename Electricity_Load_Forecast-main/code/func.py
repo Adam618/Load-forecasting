@@ -28,7 +28,7 @@ def print_config(model_name, file_path="config.json"):
         config = json.load(file)
         
         common_params = config.get('COMMON', {})
-        model_params = config.get('CNN_LSTM', {})
+        model_params = config.get(model_name, {})
         
         # Convert dictionaries to list of tuples for tabulate
         common_table = [(k, v) for k, v in common_params.items()]
