@@ -1,0 +1,94 @@
+{   "COMMON":
+    {
+    "model_name":"LSTM",
+    "data_path" : "/root/autodl-tmp/6.5_电力负荷预测/Electricity_Load_Forecast-main/data/Area1_Load_Weather_Time.csv",
+    "save_path" : "/root/autodl-tmp/6.5_电力负荷预测/Electricity_Load_Forecast-main/save",
+    "seq_length": 672,
+    "pred_length": 192,
+    "input_size": 9
+    },
+    "CNN":
+    {
+     "batch_size": 512,
+     "num_epochs": 50,
+     "learning_rate": 0.0001,
+     "hidden_size": 96,
+     "num_layers": 2,
+     "kernel_size": 3
+   },
+    "CNN_LSTM":
+     {
+      "batch_size": 512,
+      "num_epochs": 50,
+      "learning_rate": 0.01,
+      "hidden_size": 96,
+      "num_layers": 2,
+      "kernel_size": 3
+    },
+    "CNN_GRU":
+    {
+     "batch_size": 512,
+     "num_epochs": 50,
+     "learning_rate": 0.01,
+     "hidden_size": 96,
+     "num_layers": 2,
+     "kernel_size": 3
+   },
+    "TwoD_CNN_LSTM":
+    {
+     "batch_size": 512,
+     "num_epochs": 50,
+     "learning_rate": 0.01,
+     "hidden_size": 96,
+     "num_layers": 2,
+     "main_period": 24,
+     "kernel_size": 7
+   },
+   "TwoD_CNN_GRU":
+   {
+    "batch_size": 512,
+    "num_epochs": 50,
+    "learning_rate": 0.01,
+    "hidden_size": 96,
+    "num_layers": 2,
+    "main_period": 24,
+    "kernel_size": 7
+  },
+   "TwoD_CNN_LSTM_Attention":
+   {
+    "batch_size": 512,
+    "num_epochs": 100,
+    "learning_rate": 0.01,
+    "hidden_size": 96,
+    "num_layers": 2,
+    "main_period": 24,
+    "kernel_size": 3
+  },
+  "TwoD_CNN_GRU_Attention":
+   {
+    "batch_size": 512,
+    "num_epochs": 100,
+    "learning_rate": 0.01,
+    "hidden_size": 96,
+    "num_layers": 2,
+    "main_period": 24,
+    "kernel_size": 3
+  },
+   "LSTM":
+   {
+    "batch_size": 512,
+    "num_epochs": 50,
+    "learning_rate": 0.01,
+    "hidden_size": 96,
+    "num_layers": 2,
+    "kernel_size": 5
+  },
+  "GRU":
+  {
+   "batch_size": 512,
+   "num_epochs": 50,
+   "learning_rate": 0.01,
+   "hidden_size": 96,
+   "num_layers": 2
+ }
+  }

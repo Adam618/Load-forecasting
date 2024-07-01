@@ -13,9 +13,11 @@ import func
 import torch.nn.functional as F
 import copy
 import math
+import xgboost as xgb
+import argparse
 
+# 固定随机种子，保持每次模型训练结果的精度一致
 os.environ['KMP_DUPLICATE_LIB_OK']='True'
-
 seed = 3407
 random.seed(seed)
 np.random.seed(seed)
@@ -24,60 +26,30 @@ torch.cuda.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-# model_name = 'TwoD_CNN_LSTM_Attention'
-model_name = 'TwoD_CNN_LSTM'
+parser = argparse.ArgumentParser(description="运行模型脚本")
+parser.add_argument('--config_path', type=str, required=True, help='配置文件路径')
+args = parser.parse_args()
+
+# 使用传递的配置文件路径
+config_path = args.config_path
+# config_path = 'config_96.json'
+CONFIG = func.load_config(config_path)
+func.print_config(config_path)
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 scaler = StandardScaler()
-CONFIG = func.load_config()
-func.print_config(model_name)
+
 data_path = CONFIG['COMMON']['data_path']  
 seq_length = CONFIG['COMMON']['seq_length']
 input_size = CONFIG['COMMON']['input_size']
 pred_length = CONFIG['COMMON']['pred_length']
 output_size = CONFIG['COMMON']['pred_length']
-save_model_path = CONFIG['COMMON']['save_path']+'/model/best_'+model_name+'.pt'
-save_image_path = CONFIG['COMMON']['save_path']+'/image/实验图片/'+model_name+'_loss.png'
+model_name = CONFIG['COMMON']['model_name']
+save_data_path = os.path.join(CONFIG['COMMON']['save_path'], model_name)
+if not os.path.exists(save_data_path):
+    os.makedirs(save_data_path)
 
-
-
-class ChannelAttention(nn.Module):
-    def __init__(self, num_channels, reduction_ratio=9):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(num_channels, num_channels//reduction_ratio, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(num_channels//reduction_ratio, num_channels, bias=False),
-            nn.Sigmoid()
-        )
-    
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        return x * y.expand_as(x)
-
-class ConvLayer(nn.Module):
-    def __init__(self, c_in):
-        super(ConvLayer, self).__init__()
-        padding = 1 if torch.__version__>='1.5.0' else 2
-        self.downConv = nn.Conv1d(in_channels=c_in,
-                                  out_channels=c_in,
-                                  kernel_size=3,
-                                  padding=padding,
-                                  padding_mode='circular')
-        self.norm = nn.BatchNorm1d(c_in)
-        self.activation = nn.ELU()
-        self.maxPool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
-
-    def forward(self, x):
-        x = self.downConv(x.permute(0, 2, 1))
-        x = self.norm(x)
-        x = self.activation(x)
-        x = self.maxPool(x)
-        x = x.transpose(1,2)
-        return x
-
+# 数据处理
 class TimeSeriesDataset(Dataset):
     def __init__(self, data, seq_length, pred_length):
         self.load_data = data[:,0,0].reshape(-1, 1)
@@ -96,125 +68,8 @@ class TimeSeriesDataset(Dataset):
         y = self.load_data[index + self.seq_length:index + self.seq_length + self.pred_length]
         y = y.reshape(-1)
         return x_combined, y
-
-def FFT_for_Period(x, k=2):
-    # [B, T, C]
-    x = x[:,:,0].unsqueeze(2)
-    # print('x.shape',x.shape)
-    xf = torch.fft.rfft(x, dim=1)
-    # find period by amplitudes
-    frequency_list = abs(xf).mean(0).mean(-1)
-    frequency_list[0] = 0
-    _, top_list = torch.topk(frequency_list, k)
-    top_list = top_list.detach().cpu().numpy()
-    period = x.shape[1] // top_list
-    return period, abs(xf).mean(-1)[:, top_list]
-
-
-class LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length):
-        super(LSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.seq_length = seq_length
-       
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
-        # self.attention = Attention(hidden_size)
-
-    def forward(self, x):
-        B, T, N = x.size()
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return out
-
-class CNN_LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length,  kernel_size):
-        super(CNN_LSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.seq_length = seq_length
-        self.kernel_size = kernel_size
-        
-        self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
-        # self.conv2 = nn.Conv2d(input_size, input_size, kernel_size=2*2+1, padding=2)
-        self.convLayer = ConvLayer(input_size)
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
-        # self.attention = Attention(hidden_size)
-        
-
-    def forward(self, x):
-        B, T, N = x.size()
-        x = self.convLayer(x)
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return out
     
-
-
-class TwoD_CNN_LSTM(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
-        super(TwoD_CNN_LSTM, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.seq_length = seq_length
-        self.main_period = main_period
-        self.kernel_size = kernel_size
-        
-        self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
-        self.convLayer = ConvLayer(input_size)
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
-        
-
-    def forward(self, x):
-        B, T, N = x.size()
-        x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period, N).permute(0, 3, 1, 2).contiguous()
-        x = self.conv1(x)
-        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
-
-        x = self.convLayer(x)
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return out
-
-class TwoD_CNN_LSTM_Attention(nn.Module):
-    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
-        super(TwoD_CNN_LSTM_Attention, self).__init__()
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.seq_length = seq_length
-        self.main_period = main_period
-        self.kernel_size = kernel_size
-        
-        self.conv1 = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
-        self.ca1 = ChannelAttention(input_size)  # Channel Attention for the first convolution
-        self.convLayer = ConvLayer(input_size)
-        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
-        
-
-    def forward(self, x):
-        B, T, N = x.size()
-        x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period, N).permute(0, 3, 1, 2).contiguous()
-        
-        x = self.conv1(x)
-        x = self.ca1(x)  # Apply channel attention after the first convolution
-        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
-        x = self.convLayer(x)
-        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
-        out, _ = self.lstm(x, (h0, c0))
-        out = self.fc(out[:, -1, :])
-        return out
-    
+# 数据处理   
 def get_dataloaders(model_name):# 读取训练集和验证集的数据
     batch_size = CONFIG[model_name]['batch_size']
 
@@ -223,6 +78,7 @@ def get_dataloaders(model_name):# 读取训练集和验证集的数据
     m_val = 52*96 # 验证集数量
     m_test = 52*96 # 测试集数量
     m_train = m_all - m_test - m_val # 训练集数量
+    print(m_train)
 
     # Avg_Temperature  Avg_Humidity Rainfall缺失值用前一个值填充
     df['Avg_Temperature'] = df['Avg_Temperature'].fillna(method='ffill')
@@ -237,12 +93,19 @@ def get_dataloaders(model_name):# 读取训练集和验证集的数据
 
     
     # 用训练集的数据计算均值和方差
-    scaler.fit(train_df)
-    train_df = scaler.transform(train_df)
-    # 对验证集和测试集进行相同的归一化操作
-    val_df = scaler.transform(val_df)
     test_df_origin = test_df
-    test_df = scaler.transform(test_df)
+
+    if model_name != "XGBoost":
+        scaler.fit(train_df)
+        train_df = scaler.transform(train_df)
+        # 对验证集和测试集进行相同的归一化操作
+        val_df = scaler.transform(val_df)
+        test_df = scaler.transform(test_df)
+    else:
+        train_df = train_df.values
+        val_df = val_df.values
+        test_df = test_df.values
+
     print('Dimensions of training, validation, and test sets:')
     print(train_df.shape, val_df.shape, test_df.shape)
 
@@ -261,7 +124,285 @@ def get_dataloaders(model_name):# 读取训练集和验证集的数据
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     return test_df_origin, train_dataloader, val_dataloader, test_dataloader
 
+# 根据傅里叶变换算出时间序列的周期
+def FFT_for_Period(x, k=2):
+    # [B, T, C]
+    x = x[:,:,0].unsqueeze(2)
+    xf = torch.fft.rfft(x, dim=1)
+    # find period by amplitudes
+    frequency_list = abs(xf).mean(0).mean(-1)
+    frequency_list[0] = 0
+    _, top_list = torch.topk(frequency_list, k)
+    top_list = top_list.detach().cpu().numpy()
+    period = x.shape[1] // top_list
+    return period, abs(xf).mean(-1)[:, top_list]
 
+# 1D-CNN网络定义 
+class CNN(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, kernel_size):
+        super(CNN, self).__init__()
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.kernel_size = kernel_size
+
+        # 创建多个卷积层
+        layers = []
+        for i in range(num_layers):
+            if i == 0:
+                layers.append(Conv1dLayer(input_size, hidden_size,kernel_size))
+            else:
+                layers.append(Conv1dLayer(hidden_size, hidden_size,kernel_size))
+        self.convLayers = nn.ModuleList(layers)
+
+        # 定义全连接层
+        # self.fc = nn.Linear(hidden_size, output_size)
+        self.fc = nn.Linear(self.seq_length//(2**num_layers), output_size)
+
+    def forward(self, x):
+        B, T, N = x.size()
+        # x = x.transpose(1, 2)  # 调整维度以符合卷积层的输入要求 (B, N, T)
+
+        # 应用多个卷积层
+        for layer in self.convLayers:
+            x = layer(x)
+
+        x = x.mean(dim=2)  # 全局平均池化, (B, hidden_size)
+        x = self.fc(x)  # 应用全连接层
+        return x
+    
+# GRU网络定义
+class GRU(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length):
+        super(GRU, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        B, T, N = x.size()
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.gru(x, h0)
+        out = self.fc(out[:, -1, :])
+        return out
+    
+
+# LSTM网络定义
+class LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length):
+        super(LSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        B, T, N = x.size()
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return out
+
+# CNN-LSTM网络定义
+class CNN_LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length,  kernel_size):
+        super(CNN_LSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.kernel_size = kernel_size
+        self.conv1dLayer = Conv1dLayer(input_size, kernel_size)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+        # self.attention = Attention(hidden_size)
+        
+
+    def forward(self, x):
+        B, T, N = x.size()
+        x = self.conv1dLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return out
+
+class CNN_GRU(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, kernel_size):
+        super(CNN_GRU, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.kernel_size = kernel_size
+        self.conv1dLayer = Conv1dLayer(input_size,kernel_size)
+        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        B, T, N = x.size()
+        x = self.conv1dLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.gru(x, h0)
+        out = self.fc(out[:, -1, :])
+        return out
+
+# 一维卷积层定义   
+class Conv1dLayer(nn.Module):
+    def __init__(self, c_in,kernel_size=3,c_out=None,):
+        super(Conv1dLayer, self).__init__()
+        if c_out is None:
+            c_out = c_in
+        padding = (kernel_size-1)//2 
+        self.downConv = nn.Conv1d(in_channels=c_in,
+                                  out_channels=c_out,
+                                  kernel_size=kernel_size,
+                                  padding=padding,
+                                  padding_mode='circular')
+        self.norm = nn.BatchNorm1d(c_out)
+        self.activation = nn.ELU()
+        self.maxPool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+
+    def forward(self, x):
+        x = self.downConv(x.permute(0, 2, 1))
+        x = self.norm(x)
+        x = self.activation(x)
+        x = self.maxPool(x)
+        x = x.transpose(1,2)
+        return x
+    
+# 2D-CNN-LSTM定义 
+class TwoD_CNN_LSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+        super(TwoD_CNN_LSTM, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.main_period = main_period
+        self.kernel_size = kernel_size
+        
+        self.conv2d = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        self.conv1dLayer = Conv1dLayer(input_size)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)      
+
+    def forward(self, x):
+        B, T, N = x.size()
+        # period,_ = FFT_for_Period(x,1)
+        # print(period)
+        x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period, N).permute(0, 3, 1, 2).contiguous()
+        x = self.conv2d(x)
+        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+
+        x = self.conv1dLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return out
+
+class TwoD_CNN_GRU(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+        super(TwoD_CNN_GRU, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.main_period = main_period
+        self.kernel_size = kernel_size
+        
+        self.conv2d = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        self.conv1dLayer = Conv1dLayer(input_size)
+        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)      
+
+    def forward(self, x):
+        B, T, N = x.size()
+        x = x.reshape(B, self.seq_length // self.main_period, self.main_period, N).permute(0, 3, 1, 2).contiguous()
+        x = self.conv2d(x)
+        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+
+        x = self.conv1dLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.gru(x, h0)
+        out = self.fc(out[:, -1, :])
+        return out
+ 
+# 通道注意力机制
+class ChannelAttention(nn.Module):
+    def __init__(self, num_channels, reduction_ratio=9):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(num_channels, num_channels//reduction_ratio, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(num_channels//reduction_ratio, num_channels, bias=False),
+            nn.Sigmoid()
+        )
+    
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
+
+# 2D-CNN-LSTM-Attention网络定义
+class TwoD_CNN_LSTM_Attention(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+        super(TwoD_CNN_LSTM_Attention, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.main_period = main_period
+        self.kernel_size = kernel_size
+        
+        self.conv2d = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        self.ca1 = ChannelAttention(input_size)  # Channel Attention for the first convolution
+        self.conv1dLayer = Conv1dLayer(input_size)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+        
+    def forward(self, x):
+        B, T, N = x.size()
+        x = x.reshape(B,  self.seq_length//self.main_period ,self.main_period, N).permute(0, 3, 1, 2).contiguous()
+        x = self.conv2d(x)
+        x = self.ca1(x)  
+        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+        x = self.conv1dLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        c0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h0, c0))
+        out = self.fc(out[:, -1, :])
+        return out
+    
+class TwoD_CNN_GRU_Attention(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size):
+        super(TwoD_CNN_GRU_Attention, self).__init__()
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.seq_length = seq_length
+        self.main_period = main_period
+        self.kernel_size = kernel_size
+        
+        self.conv2d = nn.Conv2d(input_size, input_size, kernel_size=self.kernel_size, padding=(self.kernel_size-1)//2)
+        self.ca1 = ChannelAttention(input_size)  # Channel Attention for the first convolution
+        self.conv1dLayer = Conv1dLayer(input_size)
+        self.gru = nn.GRU(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+        
+    def forward(self, x):
+        B, T, N = x.size()
+        x = x.reshape(B, self.seq_length // self.main_period, self.main_period, N).permute(0, 3, 1, 2).contiguous()
+        x = self.conv2d(x)
+        x = self.ca1(x)
+        x = x.permute(0, 2, 3, 1).reshape(B, -1, N)
+        x = self.conv1dLayer(x)
+        h0 = torch.zeros(self.num_layers, x.size(0), self.hidden_size).to(x.device)
+        out, _ = self.gru(x, h0)
+        out = self.fc(out[:, -1, :])
+        return out
 
 def train_model(model_name, train_dataloader, val_dataloader):
     # 模型公有参数
@@ -300,8 +441,17 @@ def train_model(model_name, train_dataloader, val_dataloader):
         model = CNN_LSTM(input_size, hidden_size, num_layers, output_size, seq_length, kernel_size)
     elif model_name == 'LSTM':
         model = LSTM(input_size, hidden_size, num_layers, output_size, seq_length)
+    elif model_name == 'CNN':
+        model = CNN(input_size, hidden_size, num_layers, output_size, seq_length, kernel_size)
+    elif model_name == 'GRU':
+        model = GRU(input_size, hidden_size, num_layers, output_size, seq_length)
+    elif model_name == 'CNN_GRU':
+        model = CNN_GRU(input_size, hidden_size, num_layers, output_size, seq_length, kernel_size)
+    elif model_name == 'TwoD_CNN_GRU':
+        model = TwoD_CNN_GRU(input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size)
+    elif model_name == 'TwoD_CNN_GRU_Attention':
+        model = TwoD_CNN_GRU_Attention(input_size, hidden_size, num_layers, output_size, seq_length, main_period, kernel_size)
 
-  
     model.to(device)
 
 
@@ -360,8 +510,8 @@ def train_model(model_name, train_dataloader, val_dataloader):
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_wts = copy.deepcopy(model.state_dict())
-            save_model_path
-            torch.save(best_model_wts, save_model_path)
+            
+            torch.save(best_model_wts, os.path.join(save_data_path,f'model.pt'))
             patience_counter = 0
         else:
             patience_counter += 1
@@ -378,10 +528,11 @@ def train_model(model_name, train_dataloader, val_dataloader):
     print(f'Best Val Loss: {best_val_loss:.4f}')
     
     # 画出train_loss和val_loss
+    plt.title(f"Train and Val loss of {model_name}")
     plt.plot(train_loss_list, label='Train Loss')
     plt.plot(val_loss_list, label='Val Loss')
     plt.legend()
-    plt.savefig(save_image_path, dpi=600, bbox_inches='tight')
+    plt.savefig(os.path.join(save_data_path,'loss.png'), dpi=600, bbox_inches='tight')
     plt.show()
     
     return model
@@ -406,7 +557,7 @@ def test_model(model_name, test_dataloader, test_df_origin, model):
     # test_dataset = TimeSeriesDataset(test_data, seq_length, pred_length)
     # test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     # 加载已训练好的模型参数
-    model.load_state_dict(torch.load(save_model_path))
+    model.load_state_dict(torch.load(os.path.join(save_data_path,f'model.pt')))
     model.to(device)
     model.eval()
     # 在测试集上进行预测
@@ -425,27 +576,41 @@ def test_model(model_name, test_dataloader, test_df_origin, model):
     # 将预测结果转换为pred_length维数组
     predictions = np.concatenate(predictions, axis=0).reshape(-1, 1)
     predictions = scaler.inverse_transform(np.concatenate((predictions,np.zeros((predictions.shape[0],8))),axis=1))[:,0].reshape(-1,output_size)
-    # 画出预测结果
-    plt.figure(figsize=(10, 6))
-    # 选择天数
-    n = 4223
-    plt.plot(test_true[n], label='True')
-    plt.plot(predictions[n], label='Predicted')
-    plt.legend()
-    plt.show(block=True)
-    
+    np.save(os.path.join(save_data_path,'predition.npy'),predictions)
+    np.save(os.path.join(save_data_path,'true.npy'),test_true)
 
+    # print("predictions.shape",predictions.shape)
+    # 画出预测结果
+    # plt.figure(figsize=(10, 6))
+    # 选择天数
+    # n = 4223
+    # n = 3800
+    # plt.plot(test_true[n], label='True')
+    # plt.plot(predictions[n], label='Predicted')
+    # plt.legend()
+    # plt.show(block=True)
+    
     test_true = test_true.flatten()
     # 将预测结果转换为pred_length维数组
     predictions = predictions.flatten()
 
     # 画出预测结果
-    plt.figure(figsize=(10, 6))
-    plt.plot(test_true[-96:], label='True')
-    plt.plot(predictions[-96:], label='Predicted')
-    plt.legend()
-    plt.show(block=True)
-    plt.savefig(CONFIG['COMMON']['save_path']+'/image/实验图片/'+model_name+'_predition_4223.png')
+    # plt.figure(figsize=(10, 6))
+    # plt.plot(test_true[-96:], label='True')
+    # plt.plot(predictions[-96:], label='Predicted')
+    # plt.legend()
+    # plt.show(block=True)
+    # plt.savefig(CONFIG['COMMON']['save_path']+'/image/实验图片/'+model_name+'_predition_'+str(n)+'.png')
+
+    # # Scatter plot of the entire test set
+    # plt.figure(figsize=(10, 6))
+    # plt.scatter(test_true[::pred_length], predictions[::pred_length], alpha=0.5)
+    # plt.xlabel('True Values')
+    # plt.ylabel('Predicted Values')
+    # plt.title('Scatter plot of True vs Predicted Values')
+    # plt.show()
+    # plt.savefig(CONFIG['COMMON']['save_path']+'/image/实验图片/'+model_name+'_PreditionVsTrue.png')
+
     print('Metrics:')
     mae = mean_absolute_error(test_true, predictions)
     print(f'MAE: {mae:.2f}')

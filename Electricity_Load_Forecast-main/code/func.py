@@ -18,16 +18,17 @@ import pandas as pd
 import pprint
 from tabulate import tabulate
 
-def load_config(file_path="config.json"):
+def load_config(file_path="config_96.json"):
     with open(file_path, "r") as f:
         config = json.load(f)
     return config
 
-def print_config(model_name, file_path="config.json"):
+def print_config(file_path="config_96.json"):
     with open(file_path, 'r', encoding='utf-8') as file:
         config = json.load(file)
         
         common_params = config.get('COMMON', {})
+        model_name = common_params.get('model_name', {})
         model_params = config.get(model_name, {})
         
         # Convert dictionaries to list of tuples for tabulate
