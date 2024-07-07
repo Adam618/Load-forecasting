@@ -78,7 +78,7 @@ def get_dataloaders(model_name):# 读取训练集和验证集的数据
     m_val = 52*96 # 验证集数量
     m_test = 52*96 # 测试集数量
     m_train = m_all - m_test - m_val # 训练集数量
-    print(m_train)
+    # print(m_train)
 
     # Avg_Temperature  Avg_Humidity Rainfall缺失值用前一个值填充
     df['Avg_Temperature'] = df['Avg_Temperature'].fillna(method='ffill')
@@ -151,9 +151,9 @@ class CNN(nn.Module):
         layers = []
         for i in range(num_layers):
             if i == 0:
-                layers.append(Conv1dLayer(input_size, hidden_size,kernel_size))
+                layers.append(Conv1dLayer(input_size, kernel_size,hidden_size))
             else:
-                layers.append(Conv1dLayer(hidden_size, hidden_size,kernel_size))
+                layers.append(Conv1dLayer(hidden_size, kernel_size,hidden_size))
         self.convLayers = nn.ModuleList(layers)
 
         # 定义全连接层
@@ -252,7 +252,7 @@ class CNN_GRU(nn.Module):
 
 # 一维卷积层定义   
 class Conv1dLayer(nn.Module):
-    def __init__(self, c_in,kernel_size=3,c_out=None,):
+    def __init__(self, c_in,kernel_size=3,c_out=None):
         super(Conv1dLayer, self).__init__()
         if c_out is None:
             c_out = c_in

@@ -1,6 +1,6 @@
 {   "COMMON":
     {
-    "model_name":"CNN_LSTM",
+    "model_name":"TwoD_CNN_GRU_Attention",
     "data_path" : "/root/autodl-tmp/6.5_电力负荷预测/Electricity_Load_Forecast-main/data/Area1_Load_Weather_Time.csv",
     "save_path" : "/root/autodl-tmp/6.5_电力负荷预测/Electricity_Load_Forecast-main/save",
     "seq_length": 672,
